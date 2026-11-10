@@ -105,6 +105,37 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runne
 
 
 @single_gpu_only
+def test_draft_model_mixed_hubs(vllm_runner, monkeypatch):
+    from importlib import import_module
+
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    model = "Qwen/Qwen3-0.6B"
+    snapshot = hf_api().snapshot_download(model)
+
+    def modelscope_download(repo_id, **kwargs):
+        assert repo_id == model
+        return snapshot
+
+    # Mock only the Hub boundary; both engines load real weights.
+    monkeypatch.setattr(
+        import_module("modelscope.hub.snapshot_download"),
+        "snapshot_download",
+        modelscope_download,
+    )
+    args = ArgsTest(
+        target_model=f"modelscope://{model}",
+        draft_model=f"hf://{model}",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=0.98 * 4,
+        expected_acceptance_rate=0.98,
+        num_prompts=4,
+    )
+    assert_draft_model_correctness(args, vllm_runner)
+
+
+@single_gpu_only
 def test_draft_model_realistic_example(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",

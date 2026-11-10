@@ -500,7 +500,7 @@ class SpeculativeConfig:
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
-    provided."""
+    provided. Supports `hf://owner/model` and `modelscope://owner/model`."""
     method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -640,6 +640,9 @@ class SpeculativeConfig:
     suffix_decoding_min_token_prob: float = 0.1
     """Deprecated and has no effect: the GPU suffix speculator always drafts
     `num_speculative_tokens` tokens."""
+
+    model_weights: str = ""
+    """Original draft weight source when its configuration uses a local snapshot."""
 
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load

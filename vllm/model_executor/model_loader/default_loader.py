@@ -43,7 +43,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.tracing import instrument
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.transformers_utils.repo_utils import (
+    list_filtered_repo_files,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -85,6 +87,8 @@ class DefaultModelLoader(BaseModelLoader):
         is_unused_weight: Callable[[str], bool] | None = None
         """If defined, safetensors shards holding only weights whose checkpoint
         name (before *prefix*) it accepts are not read."""
+
+        hf_token: str | bool | None = dataclasses.field(default=None, repr=False)
 
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
@@ -153,16 +157,18 @@ class DefaultModelLoader(BaseModelLoader):
         revision: str | None,
         fall_back_to_pt: bool,
         allow_patterns_overrides: list[str] | None,
+        hf_token: str | bool | None = None,
     ) -> tuple[str, list[str], bool, str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
-        model_name_or_path = (
-            maybe_download_from_modelscope(model_name_or_path, revision)
-            or model_name_or_path
-        )
-
-        is_local = os.path.isdir(model_name_or_path)
+        explicit_hf = model_name_or_path.startswith("hf://")
+        if not explicit_hf:
+            model_name_or_path = (
+                maybe_download_from_modelscope(model_name_or_path, revision)
+                or model_name_or_path
+            )
+        is_local = not explicit_hf and os.path.isdir(model_name_or_path)
         load_format = self.load_config.load_format
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
@@ -176,6 +182,7 @@ class DefaultModelLoader(BaseModelLoader):
                     list_filtered_repo_files(
                         model_name_or_path=model_name_or_path,
                         allow_patterns=["consolidated*.safetensors"],
+                        token=hf_token,
                         revision=revision,
                     )
                 )
@@ -220,6 +227,7 @@ class DefaultModelLoader(BaseModelLoader):
                 revision,
                 subfolder=subfolder,
                 ignore_patterns=self.load_config.ignore_patterns,
+                hf_token=hf_token,
             )
         else:
             hf_folder = model_name_or_path
@@ -241,7 +249,8 @@ class DefaultModelLoader(BaseModelLoader):
             # safetensors file. Using both breaks.
             # Here, we download the `model.safetensors.index.json` and filter
             # any files not found in the index.
-            if not is_local and len(hf_weights_files) > 1:
+            # Explicit HF snapshots already contain the index from config loading.
+            if not is_local and not explicit_hf and len(hf_weights_files) > 1:
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
@@ -276,6 +285,7 @@ class DefaultModelLoader(BaseModelLoader):
                 source.revision,
                 source.fall_back_to_pt,
                 source.allow_patterns_overrides,
+                source.hf_token,
             )
         )
         if (
@@ -382,10 +392,12 @@ class DefaultModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        explicit_hf = getattr(model_config, "model_weights", "").startswith("hf://")
         primary_weights = DefaultModelLoader.Source(
-            model_config.model,
+            model_config.model_weights if explicit_hf else model_config.model,
             model_config.revision,
             prefix="",
+            hf_token=model_config.hf_token if explicit_hf else None,
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
             is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
@@ -397,11 +409,24 @@ class DefaultModelLoader(BaseModelLoader):
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
+            if explicit_hf and (source.model_or_path, source.revision) == (
+                model_config.model,
+                model_config.revision,
+            ):
+                source = dataclasses.replace(
+                    source,
+                    model_or_path=primary_weights.model_or_path,
+                    hf_token=primary_weights.hf_token,
+                )
             yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:
+        explicit_hf = getattr(model_config, "model_weights", "").startswith("hf://")
         self._prepare_weights(
-            model_name_or_path=model_config.model,
+            model_name_or_path=model_config.model_weights
+            if explicit_hf
+            else model_config.model,
+            hf_token=model_config.hf_token if explicit_hf else None,
             subfolder=None,
             revision=model_config.revision,
             fall_back_to_pt=True,

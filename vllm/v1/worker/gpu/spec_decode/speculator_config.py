@@ -197,6 +197,14 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         )
         spec.draft_model_config = ModelConfig(
             model=spec.model,
+            model_weights=spec.model_weights
+            or (
+                target.model_weights
+                if spec.model == target.model
+                and target.model_weights.startswith("hf://")
+                else ""
+            ),
+            hf_token=target.hf_token,
             runner="draft",
             tokenizer=target.tokenizer,
             tokenizer_mode=target.tokenizer_mode,

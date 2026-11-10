@@ -13,12 +13,15 @@ from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
+from huggingface_hub import hf_hub_download as hf_file_download  # noqa: F401
+from huggingface_hub import snapshot_download as _hf_snapshot_download  # noqa: F401
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
     LocalEntryNotFoundError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
+    validate_repo_id,
 )
 
 from vllm import envs
@@ -26,6 +29,7 @@ from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
 
 _hf_api: HfApi | None = None
 
@@ -41,9 +45,10 @@ def hf_api() -> HfApi:
     return _hf_api
 
 
-def hf_fs() -> "huggingface_hub.HfFileSystem":
+def hf_fs(token: str | bool | None = None) -> "huggingface_hub.HfFileSystem":
     """Return a fresh HfFileSystem tagged with vLLM's library info."""
     return huggingface_hub.HfFileSystem(
+        token=token,
         library_name="vllm",
         library_version=VLLM_VERSION,
     )
@@ -141,9 +146,12 @@ def list_repo_files(
     repo_type: str | None = None,
     token: str | bool | None = None,
 ) -> list[str]:
+    repo_id = os.fspath(repo_id)
+
     def lookup_files() -> list[str]:
+        explicit_hf = repo_id.startswith("hf://")
         # directly list files if model is local
-        if (local_path := Path(repo_id)).exists():
+        if not explicit_hf and (local_path := Path(repo_id)).exists():
             return [
                 str(file.relative_to(local_path))
                 for file in local_path.rglob("*")
@@ -151,7 +159,7 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if envs.VLLM_USE_MODELSCOPE:
+            if not explicit_hf and envs.VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import modelscope_list_repo_files
 
                 return modelscope_list_repo_files(
@@ -160,7 +168,10 @@ def list_repo_files(
                     token=os.getenv("MODELSCOPE_API_TOKEN", None),
                 )
             return hf_api().list_repo_files(
-                repo_id, revision=revision, repo_type=repo_type, token=token
+                repo_id.removeprefix("hf://"),
+                revision=revision,
+                repo_type=repo_type,
+                token=token,
             )
         except huggingface_hub.errors.OfflineModeIsEnabled:
             # Don't raise in offline mode,
@@ -281,6 +292,69 @@ def file_or_path_exists(
         return file_exists(str(model), config_name, revision=revision)
     # The config file is known to not exist in cache - we can return False
     return False
+
+
+def parse_model_source(model: str) -> tuple[str, str] | None:
+    source, sep, repo = model.partition("://")
+    if not sep or source not in ("hf", "modelscope"):
+        return None
+    if repo.count("/") != 1:
+        raise ValueError(f"Expected {source}://owner/model, got {model!r}")
+    validate_repo_id(repo)
+    return source, repo
+
+
+def resolve_model_source(
+    reference: tuple[str, str],
+    *,
+    revision: str | None = None,
+    code_revision: str | None = None,
+    download_dir: str | None = None,
+    hf_token: str | bool | None = None,
+    load_format: str = "auto",
+    ignore_patterns: str | list[str] | None = None,
+    tokenizer_only: bool = False,
+) -> tuple[str, str]:
+    """Return the config path and, for a partial HF snapshot, its weight URI."""
+    source, repo = reference
+    if (
+        source == "hf"
+        and not envs.VLLM_USE_MODELSCOPE
+        and not envs.VLLM_MODEL_REDIRECT_PATH
+        and not os.path.exists(repo)
+        and hf_token is None
+        and not huggingface_hub.constants.HF_HUB_OFFLINE
+    ):
+        return repo, ""
+
+    if code_revision is not None and code_revision != revision:
+        raise ValueError("A Hub snapshot requires matching model and code revisions.")
+    if source == "hf":
+        if not tokenizer_only and load_format.lower() not in (
+            "auto",
+            "hf",
+            "pt",
+            "safetensors",
+        ):
+            raise ValueError(f"Use a local checkpoint for load_format={load_format!r}")
+        snapshot = _snapshot_non_weight_files(repo, revision, download_dir, hf_token)
+        weights = (
+            ""
+            if tokenizer_only or huggingface_hub.constants.HF_HUB_OFFLINE
+            else f"hf://{repo}"
+        )
+        return snapshot, weights
+
+    from modelscope.hub.snapshot_download import snapshot_download
+
+    snapshot = snapshot_download(
+        repo,
+        revision=revision,
+        cache_dir=download_dir,
+        ignore_patterns=_WEIGHT_FILE_PATTERNS if tokenizer_only else ignore_patterns,
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+    return snapshot, ""
 
 
 def get_model_path(model: str | Path, revision: str | None = None):

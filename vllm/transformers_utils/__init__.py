@@ -4,6 +4,9 @@
 from vllm import envs
 
 if envs.VLLM_USE_MODELSCOPE:
+    # Bind the native HF download functions before ModelScope patches the Hub.
+    from vllm.transformers_utils import repo_utils as _repo_utils  # noqa: F401
+
     try:
         # Patch here, before each import happens
         import modelscope

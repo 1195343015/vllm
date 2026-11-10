@@ -4,6 +4,7 @@
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -54,7 +55,11 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
 from vllm.transformers_utils.processor import processor_has_attr
-from vllm.transformers_utils.repo_utils import resolve_revision
+from vllm.transformers_utils.repo_utils import (
+    is_mistral_model_repo,
+    parse_model_source,
+    resolve_revision,
+)
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -162,11 +167,11 @@ class ModelConfig:
     model: str = "Qwen/Qwen3-0.6B"
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
-    not specified."""
+    not specified. Supports `hf://owner/model` and `modelscope://owner/model`
+    independently of `VLLM_USE_MODELSCOPE`."""
     model_weights: str = ""
-    """Original model weights path. Used when the model is pulled from object
-    storage (e.g., RunAI) to preserve the original URI while `model` points to
-    the local directory."""
+    """Original weight URI for an explicit Hugging Face or object-storage source
+    when `model` points to the local metadata directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -176,7 +181,7 @@ class ModelConfig:
     adapt a text generation model to be used for pooling tasks."""
     tokenizer: str = None  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    name or path will be used."""
+    name or path will be used. Supports `hf://` and `modelscope://` prefixes."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:
 
@@ -658,6 +663,33 @@ class ModelConfig:
             self.hf_token,
         )
 
+        if self.model_weights.startswith("hf://"):
+            snapshot = Path(self.model)
+            if snapshot.parent.name == "snapshots":
+                self.revision = snapshot.name
+            native_config = (
+                self.config_format == "auto"
+                and self.hf_config_path in (None, self.model)
+                and (snapshot / "params.json").is_file()
+            )
+            native_tokenizer = (
+                self.tokenizer_mode == "auto"
+                and self.tokenizer == self.model
+                and (
+                    (snapshot / "tekken.json").is_file()
+                    or any(snapshot.glob("tokenizer.model.v*"))
+                )
+            )
+            if (native_config or native_tokenizer) and is_mistral_model_repo(
+                self.model_weights,
+                revision=self.revision,
+                token=self.hf_token,
+            ):
+                if native_config:
+                    self.config_format = "mistral"
+                if native_tokenizer:
+                    self.tokenizer_mode = "mistral"
+
         # The config can live in another repo, which `self.revision` does not pin.
         # It stays `None` if the config comes from `self.model`, so that call sites
         # fall back to `self.revision` the same way they fall back to `self.model`.
@@ -665,7 +697,9 @@ class ModelConfig:
         if self.hf_config_path and self.hf_config_path != self.model:
             self._hf_config_revision = resolve_revision(
                 self.hf_config_path,
-                self.revision,
+                requested_revision
+                if self.model_weights.startswith("hf://")
+                else self.revision,
                 self.hf_token,
             )
 
@@ -831,6 +865,8 @@ class ModelConfig:
             self.hf_config,
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
+            hf_weights=self.model_weights,
+            hf_token=self.hf_token,
             revision=self.revision,
             config_format=self.config_format,
         )
@@ -1242,7 +1278,7 @@ class ModelConfig:
 
         """
         # Skip if model_weights is already set (model already pulled)
-        if self.model_weights:
+        if self.model_weights and not self.model_weights.startswith("hf://"):
             return
 
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
@@ -1297,7 +1333,12 @@ class ModelConfig:
         """
         if not getattr(self.hf_config, "tie_word_embeddings", False):
             return
-        if not checkpoint_has_lm_head(self.model, revision=self.revision):
+        if not checkpoint_has_lm_head(
+            self.model,
+            revision=self.revision,
+            hf_weights=self.model_weights,
+            hf_token=self.hf_token,
+        ):
             return
 
         logger.debug(
@@ -2384,6 +2425,8 @@ def get_served_model_name(model: str, served_model_name: str | list[str] | None)
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
+        if reference := parse_model_source(model):
+            return reference[1]
         return model
     if isinstance(served_model_name, list):
         return served_model_name[0]
@@ -2528,9 +2571,16 @@ def _get_and_verify_dtype(
     is_pooling_model: bool,
     revision: str | None = None,
     config_format: str | ConfigFormat = "hf",
+    hf_weights: str = "",
+    hf_token: str | bool | None = None,
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        config, model_id, revision=revision, config_format=config_format
+        config,
+        model_id,
+        revision=revision,
+        config_format=config_format,
+        hf_weights=hf_weights,
+        hf_token=hf_token,
     )
     model_type = config.model_type
 

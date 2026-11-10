@@ -123,7 +123,12 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_model_path
+from vllm.transformers_utils.repo_utils import (
+    any_pattern_in_repo_files,
+    get_model_path,
+    parse_model_source,
+    resolve_model_source,
+)
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -939,6 +944,46 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+        model_ref = parse_model_source(self.model)
+        tokenizer_ref = parse_model_source(self.tokenizer) if self.tokenizer else None
+        self._explicit_target_hub = model_ref is not None
+        original_model = self.model
+        resolve = functools.partial(
+            resolve_model_source,
+            download_dir=self.download_dir,
+            hf_token=self.hf_token,
+            load_format=self.load_format,
+            ignore_patterns=self.ignore_patterns,
+        )
+        if model_ref:
+            self.model, weights = resolve(
+                model_ref, revision=self.revision, code_revision=self.code_revision
+            )
+            if weights:
+                self.model_weights = weights
+            if not self.served_model_name:
+                self.served_model_name = [model_ref[1]]
+            if self.tokenizer is None or self.tokenizer == original_model:
+                if self.tokenizer_revision in (None, self.revision):
+                    self.tokenizer = self.model
+                    tokenizer_ref = None
+                else:
+                    tokenizer_ref = model_ref
+
+        if tokenizer_ref:
+            self.tokenizer, _ = resolve(
+                tokenizer_ref, revision=self.tokenizer_revision, tokenizer_only=True
+            )
+            if (
+                self.tokenizer_mode == "auto"
+                and os.path.isdir(self.tokenizer)
+                and any_pattern_in_repo_files(
+                    self.tokenizer, ["tekken.json", "tokenizer.model.v*"]
+                )
+            ):
+                raise ValueError(
+                    "Set --tokenizer-mode for a standalone Mistral tokenizer snapshot."
+                )
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             # Skip cloud storage URIs (s3://, gs://, az://) — they are not
@@ -2167,6 +2212,25 @@ class EngineArgs:
             k.replace("-", "_"): v for k, v in self.speculative_config.items()
         }
 
+        draft = self.speculative_config.get("model")
+        if draft and (reference := parse_model_source(draft)):
+            load = self.speculative_config.get("draft_load_config")
+            if load is None:
+                load = self.create_load_config()
+            elif isinstance(load, dict):
+                load = LoadConfig(**load)
+            self.speculative_config["model"], weights = resolve_model_source(
+                reference,
+                revision=self.speculative_config.get("revision"),
+                code_revision=self.speculative_config.get("code_revision"),
+                download_dir=load.download_dir,
+                hf_token=self.hf_token,
+                load_format=load.load_format,
+                ignore_patterns=load.ignore_patterns,
+            )
+            if weights:
+                self.speculative_config["model_weights"] = weights
+
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
@@ -2313,6 +2377,7 @@ class EngineArgs:
                     revision=self.revision,
                     trust_remote_code=self.trust_remote_code,
                     vllm_speculative_config=self.speculative_config,
+                    explicit_target_hub=self._explicit_target_hub,
                     hf_token=self.hf_token,
                 )
             )

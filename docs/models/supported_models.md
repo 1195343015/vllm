@@ -350,6 +350,25 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
+Use `hf://owner/model` or `modelscope://owner/model` to select the Hub for an
+individual model, tokenizer, or speculative draft. Bare IDs use the configured
+default. For example:
+
+```shell
+vllm serve modelscope://Qwen/Qwen3-8B \
+  --speculative-config '{"method":"eagle3","model":"hf://RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3}'
+```
+
+With the default HF backend, an explicit HF ID normally follows the same
+loading path as a bare ID. If an HF source needs a local metadata snapshot
+(for example, to override ModelScope or a same-named local directory), the
+standard weight loader downloads the selected checkpoint format at the same
+commit. This path supports `auto`, `hf`, `pt` and `safetensors`.
+Snapshot paths must be accessible to all workers. A separate code revision
+requires native HF loading. For an independently downloaded Mistral tokenizer
+snapshot, set `--tokenizer-mode mistral`. When using a speculator checkpoint,
+specify the target and draft explicitly.
+
 ## Feature Status Legend
 
 - ✅︎ indicates that the feature is supported for the model.
