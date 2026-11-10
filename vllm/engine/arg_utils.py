@@ -123,8 +123,12 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.model_hub import parse_model_source, resolve_model_source
-from vllm.transformers_utils.repo_utils import any_pattern_in_repo_files, get_model_path
+from vllm.transformers_utils.repo_utils import (
+    any_pattern_in_repo_files,
+    get_model_path,
+    parse_model_source,
+    resolve_model_source,
+)
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,

@@ -18,11 +18,11 @@ from vllm.config import ParallelConfig
 from vllm.config.model import get_served_model_name
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.transformers_utils.model_hub import (
+from vllm.transformers_utils.repo_utils import (
+    list_repo_files,
     parse_model_source,
     resolve_model_source,
 )
-from vllm.transformers_utils.repo_utils import list_repo_files
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def hubs(monkeypatch, tmp_path):
         return str(snapshot)
 
     for module in (
-        "transformers_utils.model_hub",
+        "transformers_utils.repo_utils",
         "model_executor.model_loader.weight_utils",
     ):
         monkeypatch.setattr(
@@ -382,7 +382,7 @@ def test_download_failure_never_falls_back(monkeypatch, hubs, source):
         raise failure
 
     sdk = (
-        "vllm.transformers_utils.model_hub.hf_snapshot_download"
+        "vllm.transformers_utils.repo_utils.hf_snapshot_download"
         if source == "hf"
         else "modelscope.snapshot_download"
     )

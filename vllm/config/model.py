@@ -50,7 +50,11 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
-from vllm.transformers_utils.repo_utils import is_mistral_model_repo, resolve_revision
+from vllm.transformers_utils.repo_utils import (
+    is_mistral_model_repo,
+    parse_model_source,
+    resolve_revision,
+)
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -2395,8 +2399,6 @@ def get_served_model_name(model: str, served_model_name: str | list[str] | None)
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
-        from vllm.transformers_utils.model_hub import parse_model_source
-
         if reference := parse_model_source(model):
             return reference[1]
         return model

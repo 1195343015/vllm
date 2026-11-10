@@ -107,7 +107,7 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runne
 
 @single_gpu_only
 def test_draft_model_mixed_hubs(vllm_runner, monkeypatch):
-    from vllm.transformers_utils.model_hub import hf_snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_snapshot_download
 
     model = "Qwen/Qwen3-0.6B"
     snapshot = hf_snapshot_download(model)
