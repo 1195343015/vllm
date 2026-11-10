@@ -324,9 +324,8 @@ def resolve_model_source(
     load_format: str = "auto",
     ignore_patterns: str | list[str] | None = None,
     tokenizer_only: bool = False,
-    draft: bool = False,
 ) -> str:
-    """Download an explicit Hub source before ordinary local model loading."""
+    """Resolve an explicit source to a native HF repo ID or a local snapshot."""
     reference = parse_model_source(model)
     if reference is None:
         return model
@@ -343,6 +342,19 @@ def resolve_model_source(
             "Hub prefixes support auto, hf, safetensors and pt loading only. "
             "For other loaders, download the model and use its local path."
         )
+    # A bare ID can use native HF loading if it will resolve to the same
+    # remote repo and the config/tokenizer can use the default HF cache/auth.
+    if (
+        source == "hf"
+        and not envs.VLLM_USE_MODELSCOPE
+        and not envs.VLLM_MODEL_REDIRECT_PATH
+        and not os.path.exists(repo)
+        and hf_token is None
+        and download_dir is None
+        and not huggingface_hub.constants.HF_HUB_OFFLINE
+    ):
+        return repo
+
     download = hf_snapshot_download
     kwargs = dict(
         revision=revision,
@@ -382,27 +394,6 @@ def resolve_model_source(
         ]
     )
 
-    def check_config(config: dict) -> dict:
-        if "--" in json.dumps(config.get("auto_map", {})):
-            raise ValueError(
-                "Hub prefixes do not support cross-repository auto_map code; "
-                "download the model and code locally first."
-            )
-        return config
-
-    for path in snapshot.glob("*config*.json"):
-        try:
-            config = json.loads(path.read_text(), object_hook=check_config)
-        except json.JSONDecodeError:
-            # Leave validation of required files to the regular loader.
-            continue
-        if not isinstance(config, dict):
-            continue
-        if not (draft or tokenizer_only) and config.get("speculators_config"):
-            raise ValueError(
-                "With Hub prefixes, specify the target model explicitly and "
-                "pass the speculator in --speculative-config."
-            )
     if tokenizer_only or source == "hf":
         return str(snapshot)
 

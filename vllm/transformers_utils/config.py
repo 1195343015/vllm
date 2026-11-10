@@ -808,6 +808,7 @@ def maybe_override_with_speculators(
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
     hf_token: bool | str | None = None,
+    explicit_target_hub: bool = False,
     **kwargs,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """Resolve model configuration when speculators are detected.
@@ -822,6 +823,7 @@ def maybe_override_with_speculators(
         revision: Model revision
         vllm_speculative_config: Existing vLLM speculative config
         hf_token: HuggingFace token for authenticated model access
+        explicit_target_hub: Whether the user selected a Hub for the target
 
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
@@ -843,6 +845,12 @@ def maybe_override_with_speculators(
     if speculators_config is None:
         # No speculators config found, return original values
         return model, tokenizer, vllm_speculative_config
+
+    if explicit_target_hub:
+        raise ValueError(
+            "With Hub prefixes, specify the target model explicitly and "
+            "pass the speculator in --speculative-config."
+        )
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig

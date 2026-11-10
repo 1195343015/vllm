@@ -656,7 +656,7 @@ class ModelConfig:
             self.hf_token,
         )
 
-        if self.model_weights.startswith("hf://"):
+        if self.model_weights.startswith("hf://") and Path(self.model).is_dir():
             snapshot = Path(self.model)
             if snapshot.parent.name == "snapshots":
                 self.revision = snapshot.name

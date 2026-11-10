@@ -937,6 +937,7 @@ class EngineArgs:
         sources = [self.model, self.tokenizer, self.spec_model]
         sources.append((self.speculative_config or {}).get("model"))
         references = [parse_model_source(s) if s else None for s in sources]
+        self._explicit_target_hub = references[0] is not None
         if any(references):
             if envs.VLLM_USE_RUST_FRONTEND:
                 raise ValueError("Hub prefixes require the Python frontend.")
@@ -991,8 +992,12 @@ class EngineArgs:
                 self.tokenizer = resolve(
                     self.tokenizer, revision=revision, tokenizer_only=True
                 )
-                if self.tokenizer_mode == "auto" and any_pattern_in_repo_files(
-                    self.tokenizer, ["tekken.json", "tokenizer.model.v*"]
+                if (
+                    self.tokenizer_mode == "auto"
+                    and os.path.isdir(self.tokenizer)
+                    and any_pattern_in_repo_files(
+                        self.tokenizer, ["tekken.json", "tokenizer.model.v*"]
+                    )
                 ):
                     raise ValueError(
                         "For a tokenizer-only Hub snapshot with native Mistral "
@@ -2217,7 +2222,6 @@ class EngineArgs:
                 hf_token=self.hf_token,
                 load_format=load.load_format,
                 ignore_patterns=load.ignore_patterns,
-                draft=True,
             )
             if draft.startswith("hf://"):
                 self.speculative_config["model_weights"] = draft
@@ -2368,6 +2372,7 @@ class EngineArgs:
                     revision=self.revision,
                     trust_remote_code=self.trust_remote_code,
                     vllm_speculative_config=self.speculative_config,
+                    explicit_target_hub=self._explicit_target_hub,
                     hf_token=self.hf_token,
                 )
             )

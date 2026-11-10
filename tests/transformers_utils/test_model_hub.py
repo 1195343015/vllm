@@ -27,6 +27,8 @@ from vllm.transformers_utils.repo_utils import (
 
 @pytest.fixture
 def hubs(monkeypatch, tmp_path):
+    # Exercise explicit HF snapshots with ModelScope as the default backend.
+    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
     calls = []
     remote = tmp_path / "remote"
     Qwen3Config(
@@ -233,6 +235,30 @@ def test_independent_tokenizer_and_default_reuse(hubs):
     assert get_served_model_name("hf://owner/model", ["alias"]) == "alias"
 
 
+def test_default_hf_reuses_native_repo_ids(monkeypatch, tmp_path, hubs):
+    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "False")
+    monkeypatch.chdir(tmp_path)
+    args = EngineArgs(
+        model="hf://owner/model",
+        revision="model-rev",
+        tokenizer="hf://owner/tokenizer",
+        tokenizer_revision="tokenizer-rev",
+    )
+    assert (args.model, args.revision) == ("owner/model", "model-rev")
+    assert (args.tokenizer, args.tokenizer_revision) == (
+        "owner/tokenizer",
+        "tokenizer-rev",
+    )
+    assert args.model_weights == "hf://owner/model"
+    assert not hubs[1]
+
+    # A local directory must never shadow an explicit remote source.
+    Path("owner/model").mkdir(parents=True)
+    args = EngineArgs(model="hf://owner/model")
+    assert Path(args.model).is_absolute() and args.tokenizer == args.model
+    assert hubs[1][-1][:2] == ("hf", "owner/model")
+
+
 def test_invalid_tokenizer_fails_before_model_download(hubs):
     with pytest.raises(ValueError):
         EngineArgs(model="hf://owner/model", tokenizer="hf://invalid")
@@ -421,22 +447,26 @@ def test_unsupported_loading_and_code(hubs):
     with pytest.raises(ValueError, match="code_revision"):
         EngineArgs(model="hf://owner/model", code_revision="other")
     assert not hubs[1]
-    (hubs[0] / "config.json").write_text(
-        json.dumps(
-            {"auto_map": {"AutoConfig": "owner/code--configuration.CustomConfig"}}
-        )
-    )
-    with pytest.raises(ValueError, match="cross-repository"):
-        EngineArgs(model="hf://owner/model", trust_remote_code=True)
 
 
-def test_speculator_requires_explicit_target(hubs):
+def test_cross_repo_auto_map_uses_transformers_policy(hubs):
+    path = hubs[0] / "config.json"
+    config = json.loads(path.read_text())
+    config["auto_map"] = {"AutoConfig": "owner/code--configuration.CustomConfig"}
+    path.write_text(json.dumps(config))
+    args = EngineArgs(model="hf://owner/model", trust_remote_code=False)
+    assert args.create_model_config().hf_config.model_type == "qwen3"
+
+
+@pytest.mark.parametrize("source", ["hf", "modelscope"])
+def test_speculator_requires_explicit_target(hubs, source):
+    from vllm import LLM
+
     (hubs[0] / "config.json").write_text(
         json.dumps({"speculators_config": {"verifier": {}}})
     )
     with pytest.raises(ValueError, match="target model explicitly"):
-        EngineArgs(model="hf://owner/model")
-    assert Path(resolve_model_source("hf://owner/draft", draft=True)).is_dir()
+        LLM(model=f"{source}://owner/model")
 
 
 def test_builtin_mtp_reuses_local_target(hubs):

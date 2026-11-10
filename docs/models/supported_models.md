@@ -360,14 +360,17 @@ unchanged. Install `modelscope` for `modelscope://`. The default served name omi
 the prefix. Each SDK retains its authentication and cache, with no cross-Hub fallback.
 Use existing revision and download-directory options; URI revisions, subpaths,
 and queries are not supported.
-For `hf://`, vLLM fetches metadata first and uses its normal weight loader to
-download the selected format at the same revision. A safetensors load skips
-alternate PyTorch weights in the repository. ModelScope model sources use its
-snapshot download behavior. Tokenizer-only sources fetch metadata. For independently downloaded Mistral tokenizers, set
-`--tokenizer-mode mistral` explicitly. The initial implementation supports single-node Python serving
-with `auto`, `hf`, `safetensors` or `pt` checkpoints. Cross-repository `auto_map`
-and separate code revisions require locally prepared repositories. Specify both
-the target and draft explicitly instead of using speculators target inference.
+For `hf://`, vLLM uses its native Hugging Face loading path when the bare repo ID
+selects the same HF repository with default cache and authentication settings.
+When an explicit HF snapshot is needed (for example, when ModelScope is the
+default or a local directory has the same name), vLLM fetches metadata first.
+In both cases, the weight loader downloads the selected format at the resolved
+revision. A safetensors load skips alternate PyTorch weights.
+ModelScope model sources use its snapshot download behavior.
+For a separately downloaded Mistral tokenizer snapshot, set `--tokenizer-mode mistral`.
+The initial implementation supports single-node Python serving with `auto`, `hf`,
+`safetensors` or `pt` checkpoints. Separate code revisions require locally
+prepared repositories. Specify both the target and draft explicitly when using speculators.
 Other loaders and distributed deployments should use pre-downloaded local paths.
 
 ## Feature Status Legend
