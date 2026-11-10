@@ -50,7 +50,12 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
-from vllm.transformers_utils.repo_utils import hf_api, hf_fs
+from vllm.transformers_utils.repo_utils import (
+    hf_api,
+    hf_file_download,
+    hf_fs,
+    hf_snapshot_download,
+)
 from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -443,6 +448,7 @@ def download_weights_from_hf(
     revision: str | None = None,
     subfolder: str | None = None,
     ignore_patterns: str | list[str] | None = None,
+    hf_token: str | bool | None = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
 
@@ -459,18 +465,21 @@ def download_weights_from_hf(
         ignore_patterns (Optional[Union[str, list[str]]]): The patterns to
             filter out the weight files. Files matched by any of the patterns
             will be ignored.
+        hf_token: Authentication for an explicitly selected Hugging Face source.
 
     Returns:
         str: The path to the downloaded model weights.
 
     """
     assert len(allow_patterns) > 0
+    explicit_hf = model_name_or_path.startswith("hf://")
+    model_name_or_path = model_name_or_path.removeprefix("hf://")
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
     if not local_only:
         # Attempt to reduce allow_patterns to a single pattern
         # so we only have to call snapshot_download once.
         try:
-            fs = hf_fs()
+            fs = hf_fs(hf_token)
             file_list = fs.ls(
                 os.path.join(model_name_or_path, subfolder or ""),
                 detail=False,
@@ -480,9 +489,15 @@ def download_weights_from_hf(
             # If downloading safetensors and an index file exists, use the
             # specific file names from the index to avoid downloading
             # unnecessary files (e.g., from subdirectories like "original/").
-            index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
+            index_file = os.path.join(
+                model_name_or_path, subfolder or "", SAFE_WEIGHTS_INDEX_NAME
+            )
             if "*.safetensors" in allow_patterns and index_file in file_list:
-                index_path = hf_api().hf_hub_download(
+                download_index = (
+                    hf_file_download if explicit_hf else hf_api().hf_hub_download
+                )
+                index_path = download_index(
+                    token=hf_token,
                     repo_id=model_name_or_path,
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
@@ -518,8 +533,18 @@ def download_weights_from_hf(
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
         for allow_pattern in allow_patterns:
-            hf_folder = hf_api().snapshot_download(
+            # The Hub SDK matches patterns relative to the repo root.
+            if explicit_hf and subfolder:
+                if isinstance(allow_pattern, list):
+                    allow_pattern = [f"{subfolder}/{p}" for p in allow_pattern]
+                else:
+                    allow_pattern = f"{subfolder}/{allow_pattern}"
+            download = (
+                hf_snapshot_download if explicit_hf else hf_api().snapshot_download
+            )
+            hf_folder = download(
                 model_name_or_path,
+                token=hf_token,
                 allow_patterns=allow_pattern,
                 ignore_patterns=ignore_patterns,
                 cache_dir=cache_dir,
@@ -550,6 +575,7 @@ def download_safetensors_index_file_from_hf(
     cache_dir: str | None,
     subfolder: str | None = None,
     revision: str | None = None,
+    hf_token: str | bool | None = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
 
@@ -561,14 +587,19 @@ def download_safetensors_index_file_from_hf(
         subfolder (Optional[str]): The subfolder within the model repository
             to download weights from.
         revision (Optional[str]): The revision of the model.
+        hf_token: Authentication for an explicitly selected Hugging Face source.
 
     """
+    explicit_hf = model_name_or_path.startswith("hf://")
+    model_name_or_path = model_name_or_path.removeprefix("hf://")
+    download = hf_file_download if explicit_hf else hf_api().hf_hub_download
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         try:
             # Download the safetensors index file.
-            hf_api().hf_hub_download(
+            download(
+                token=hf_token,
                 repo_id=model_name_or_path,
                 filename=index_file,
                 cache_dir=cache_dir,

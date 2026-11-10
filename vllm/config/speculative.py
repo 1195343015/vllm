@@ -609,6 +609,9 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
+    model_weights: str = ""
+    """Original draft weight source when its configuration uses a local snapshot."""
+
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""

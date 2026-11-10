@@ -192,6 +192,14 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         )
         spec.draft_model_config = ModelConfig(
             model=spec.model,
+            model_weights=spec.model_weights
+            or (
+                target.model_weights
+                if spec.model == target.model
+                and target.model_weights.startswith("hf://")
+                else ""
+            ),
+            hf_token=target.hf_token,
             runner="draft",
             # use_heterogeneous_vocab is V1 model runner only.
             tokenizer=(

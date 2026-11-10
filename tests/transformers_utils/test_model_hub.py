@@ -6,19 +6,23 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from huggingface_hub.utils import TensorInfo
 from safetensors.torch import save_file
 from transformers import Qwen3Config
 
-from vllm.config import LoadConfig, ParallelConfig
+from vllm.config import ParallelConfig
 from vllm.config.model import get_served_model_name
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.transformers_utils.model_hub import (
     parse_model_source,
     resolve_model_source,
 )
+from vllm.transformers_utils.repo_utils import list_repo_files
 
 
 @pytest.fixture
@@ -37,31 +41,66 @@ def hubs(monkeypatch, tmp_path):
     def download(source, repo, **kwargs):
         calls.append((source, repo, kwargs))
         snapshot = tmp_path / source / repo
+        if source == "hf":
+            snapshot = snapshot / "snapshots" / ("a" * 40)
+        if kwargs.get("local_files_only"):
+            assert snapshot.is_dir()
+            return str(snapshot)
         snapshot.mkdir(parents=True, exist_ok=True)
         ignore = kwargs.get("ignore_patterns") or []
         if isinstance(ignore, str):
             ignore = [ignore]
+        allow = kwargs.get("allow_patterns") or ["*"]
+        if isinstance(allow, str):
+            allow = [allow]
         for file in remote.rglob("*"):
             if not file.is_file():
                 continue
             relative = file.relative_to(remote)
-            if any(
-                fnmatch.fnmatch(str(relative), p)
-                for p in kwargs.get("allow_patterns") or ["*"]
-            ) and not any(fnmatch.fnmatch(str(relative), p) for p in ignore):
+            if any(fnmatch.fnmatch(str(relative), p) for p in allow) and not any(
+                fnmatch.fnmatch(str(relative), p) for p in ignore
+            ):
                 (snapshot / relative).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(file, snapshot / relative)
         return str(snapshot)
 
+    for module in (
+        "transformers_utils.model_hub",
+        "model_executor.model_loader.weight_utils",
+    ):
+        monkeypatch.setattr(
+            f"vllm.{module}.hf_snapshot_download",
+            lambda repo, **kw: download("hf", repo, **kw),
+        )
     monkeypatch.setattr(
-        "vllm.transformers_utils.model_hub.hf_snapshot_download",
-        lambda repo, **kw: download("hf", repo, **kw),
+        "huggingface_hub.HfApi.list_repo_files",
+        lambda self, repo_id, **kw: [
+            str(p.relative_to(remote)) for p in remote.rglob("*") if p.is_file()
+        ],
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.HfFileSystem.ls",
+        lambda self, path, **kw: [
+            f"{path.rstrip('/')}/{p.name}" for p in remote.iterdir()
+        ],
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.HfApi.parse_safetensors_file_metadata",
+        lambda *args, **kw: SimpleNamespace(
+            tensors={
+                "lm_head.weight": TensorInfo(
+                    dtype="BF16", shape=[1], data_offsets=(0, 2)
+                )
+            }
+        ),
     )
     monkeypatch.setattr(
         "modelscope.snapshot_download",
         lambda repo, **kw: download("modelscope", repo, **kw),
     )
-    return remote, calls
+    list_repo_files.cache_clear()
+    yield remote, calls
+    list_repo_files.cache_clear()
 
 
 @pytest.mark.parametrize("source", ["hf", "modelscope"])
@@ -91,10 +130,39 @@ def test_existing_paths_are_unchanged(path, hubs):
     "target_source,draft_source", [("hf", "modelscope"), ("modelscope", "hf")]
 )
 @pytest.mark.parametrize("use_modelscope", ["True", "False"])
-def test_mixed_sources_load_local_weights(
+def test_mixed_sources_load_selected_weights(
     monkeypatch, tmp_path, hubs, target_source, draft_source, use_modelscope
 ):
     monkeypatch.setenv("VLLM_USE_MODELSCOPE", use_modelscope)
+    monkeypatch.chdir(tmp_path)
+    for repo in ("owner/target", "owner/draft"):
+        Path(repo).mkdir(parents=True)
+    # Only the indexed shard belongs to the model, even though a second
+    # safetensors file and alternate PyTorch weights are present.
+    index = hubs[0] / "model.safetensors.index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "lm_head.weight": "model.safetensors",
+                    "bias": "shard-2.safetensors",
+                }
+            }
+        )
+    )
+    save_file(
+        {"bias": torch.zeros(1, dtype=torch.bfloat16)}, hubs[0] / "shard-2.safetensors"
+    )
+    save_file({"extra": torch.zeros(1)}, hubs[0] / "unrelated.safetensors")
+
+    def download_index(repo_id, filename, revision, token, **kwargs):
+        assert repo_id == ("owner/target" if target_source == "hf" else "owner/draft")
+        assert revision == "a" * 40 and token == "test-token"
+        return str(hubs[0] / filename)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_utils.hf_file_download", download_index
+    )
     args = EngineArgs(
         model=f"{target_source}://owner/target",
         revision="target-rev",
@@ -110,14 +178,12 @@ def test_mixed_sources_load_local_weights(
     assert args.model == args.tokenizer
     assert args.served_model_name == ["owner/target"]
     target = args.create_model_config()
-    # Cold-cache weights are available before dtype / tied-head inspection.
+    # Header inspection must still work before checkpoint download.
     assert target.dtype == torch.bfloat16
     target.maybe_untie_word_embeddings()
     assert not target.hf_config.tie_word_embeddings
     config = args.create_speculative_config(target, ParallelConfig())
     assert config is not None
-    assert Path(config.draft_model_config.model).parent.name == "owner"
-    assert Path(config.draft_model_config.model).parents[1].name == draft_source
     for source, repo, kwargs in hubs[1]:
         assert source == (target_source if repo == "owner/target" else draft_source)
         assert kwargs["revision"] == (
@@ -125,7 +191,27 @@ def test_mixed_sources_load_local_weights(
         )
         assert kwargs["cache_dir"] == str(tmp_path)
         assert kwargs.get("token") == ("test-token" if source == "hf" else None)
-    assert (Path(args.model) / "model.safetensors").is_file()
+
+    hf_model = target if target_source == "hf" else config.draft_model_config
+    snapshot = Path(hf_model.model)
+    assert not (snapshot / "model.safetensors").exists()
+    weights = dict(
+        DefaultModelLoader(args.create_load_config()).get_all_weights(
+            hf_model, torch.nn.Module()
+        )
+    )
+    assert set(weights) == {"lm_head.weight", "bias"}
+    assert weights["lm_head.weight"].dtype == torch.bfloat16
+    assert (snapshot / "model.safetensors").is_file()
+    assert not (snapshot / "unrelated.safetensors").exists()
+    assert not (snapshot / "pytorch_model.bin").exists()
+    source, repo, kwargs = hubs[1][-1]
+    assert (source, repo) == (
+        "hf",
+        "owner/target" if target_source == "hf" else "owner/draft",
+    )
+    assert kwargs["revision"] == snapshot.name
+    assert kwargs["token"] == "test-token"
 
 
 def test_independent_tokenizer_and_default_reuse(hubs):
@@ -170,6 +256,36 @@ def test_native_tokenizer_requires_explicit_mode(hubs, source, filename):
         assert not list(Path(args.tokenizer).glob("*.safetensors"))
 
 
+def test_native_mistral_snapshot_detected_before_weights(hubs):
+    remote, _ = hubs
+    (remote / "config.json").unlink()
+    (remote / "tekken.json").write_text("{}")
+    (remote / "params.json").write_text(
+        json.dumps(
+            {
+                "dim": 32,
+                "n_layers": 1,
+                "n_heads": 4,
+                "n_kv_heads": 2,
+                "hidden_dim": 64,
+                "vocab_size": 128,
+                "norm_eps": 1e-5,
+                "max_position_embeddings": 128,
+            }
+        )
+    )
+    (remote / "model.safetensors").rename(remote / "consolidated.safetensors")
+    args = EngineArgs(model="hf://owner/model")
+    config = args.create_model_config()
+    assert config.hf_config.architectures == ["MistralForCausalLM"]
+    assert config.dtype == torch.bfloat16
+    assert config.tokenizer_mode == "mistral"
+    assert not list(Path(config.model).glob("*.safetensors"))
+    DefaultModelLoader(args.create_load_config()).download_model(config)
+    assert (Path(config.model) / "consolidated.safetensors").is_file()
+    assert not (Path(config.model) / "pytorch_model.bin").exists()
+
+
 def test_weight_ignore_patterns_preserve_config(hubs):
     args = EngineArgs(model="hf://owner/model", ignore_patterns=["*.json"])
     assert args.create_model_config().hf_config.model_type == "qwen3"
@@ -190,16 +306,26 @@ def test_load_format_is_case_insensitive(hubs):
 
 @pytest.mark.parametrize("subfolder", [None, "audio"])
 def test_auxiliary_weights_remain_available(hubs, subfolder):
-    from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-
     folder = hubs[0] / subfolder if subfolder else hubs[0]
     folder.mkdir(exist_ok=True)
     torch.save({"weight": torch.zeros(1)}, folder / "sparse_linear.pt")
-    local = resolve_model_source("hf://owner/model")
-    _, files, _, _ = DefaultModelLoader(LoadConfig())._prepare_weights(
-        local, subfolder, None, True, ["sparse_linear.pt"]
+    args = EngineArgs(model="hf://owner/model")
+    config = args.create_model_config()
+    model = torch.nn.Module()
+    model.secondary_weights = [
+        DefaultModelLoader.Source(
+            config.model,
+            config.revision,
+            subfolder=subfolder,
+            prefix="aux.",
+            allow_patterns_overrides=["sparse_linear.pt"],
+        )
+    ]
+    weights = dict(
+        DefaultModelLoader(args.create_load_config()).get_all_weights(config, model)
     )
-    assert [Path(f).name for f in files] == ["sparse_linear.pt"]
+    assert "aux.weight" in weights
+    assert not (Path(config.model) / "pytorch_model.bin").exists()
 
 
 def test_explicit_draft_load_config_does_not_inherit_target(hubs, tmp_path):
@@ -222,6 +348,9 @@ def test_explicit_draft_load_config_does_not_inherit_target(hubs, tmp_path):
     assert config is not None
     assert config.draft_load_config is not None
     assert config.draft_load_config.load_format == "auto"
+    DefaultModelLoader(config.draft_load_config).download_model(
+        config.draft_model_config
+    )
     assert (Path(config.draft_model_config.model) / "pytorch_model.bin").is_file()
     assert calls[-1][2]["ignore_patterns"] == config.draft_load_config.ignore_patterns
 
@@ -229,12 +358,19 @@ def test_explicit_draft_load_config_does_not_inherit_target(hubs, tmp_path):
 def test_snapshot_ignore_and_offline(monkeypatch, hubs):
     remote, calls = hubs
     (remote / "unused.safetensors").write_bytes(b"unused")
+    args = EngineArgs(
+        model="hf://owner/model", ignore_patterns=["unused*"], load_format="safetensors"
+    )
+    loader = DefaultModelLoader(args.create_load_config())
+    loader.download_model(args.create_model_config())
+    assert not (Path(args.model) / "unused.safetensors").exists()
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", True)
-    path = resolve_model_source("hf://owner/model", ignore_patterns=["unused*"])
-    assert sorted(p.name for p in Path(path).glob("*.safetensors")) == [
-        "model.safetensors"
-    ]
-    assert calls[-1][2]["allow_patterns"] is None
+    calls.clear()
+    args = EngineArgs(model="hf://owner/model", load_format="safetensors")
+    weights = dict(
+        loader.get_all_weights(args.create_model_config(), torch.nn.Module())
+    )
+    assert list(weights) == ["lm_head.weight"]
     assert all(c[2]["local_files_only"] for c in calls)
 
 

@@ -204,6 +204,8 @@ class ModelArchConfigConvertorBase:
         model_id: str,
         revision: str | None,
         config_format: str | ConfigFormat,
+        hf_weights: str = "",
+        hf_token: str | bool | None = None,
     ):
         # NOTE: getattr(config, "dtype", torch.float32) is not correct
         # because config.dtype can be None.
@@ -220,7 +222,9 @@ class ModelArchConfigConvertorBase:
 
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
-            param_mt = get_safetensors_params_metadata(model_id, revision=revision)
+            param_mt = get_safetensors_params_metadata(
+                model_id, revision=revision, hf_weights=hf_weights, hf_token=hf_token
+            )
 
             if param_mt:
                 param_dtypes: set[torch.dtype] = {

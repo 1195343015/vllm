@@ -360,9 +360,10 @@ unchanged. Install `modelscope` for `modelscope://`. The default served name omi
 the prefix. Each SDK retains its authentication and cache, with no cross-Hub fallback.
 Use existing revision and download-directory options; URI revisions, subpaths,
 and queries are not supported.
-Explicit sources download a local repository snapshot before loading, which may
-include multiple weight formats. Tokenizer-only sources download metadata without
-weights. For independently downloaded Mistral tokenizers, set
+For `hf://`, vLLM fetches metadata first and uses its normal weight loader to
+download the selected format at the same revision. A safetensors load skips
+alternate PyTorch weights in the repository. ModelScope model sources use its
+snapshot download behavior. Tokenizer-only sources fetch metadata. For independently downloaded Mistral tokenizers, set
 `--tokenizer-mode mistral` explicitly. The initial implementation supports single-node Python serving
 with `auto`, `hf`, `safetensors` or `pt` checkpoints. Cross-repository `auto_map`
 and separate code revisions require locally prepared repositories. Specify both

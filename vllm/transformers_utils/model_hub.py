@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import huggingface_hub
-import regex as re
 from huggingface_hub.utils import validate_repo_id
 
 from vllm.transformers_utils.repo_utils import hf_snapshot_download
@@ -88,8 +87,6 @@ def resolve_model_source(
             "*.spm",
         ]
     )
-    if source == "hf" and re.fullmatch(r"[0-9a-f]{40}", snapshot.name):
-        kwargs["revision"] = snapshot.name
 
     def check_config(config: dict) -> dict:
         if "--" in json.dumps(config.get("auto_map", {})):
@@ -112,9 +109,9 @@ def resolve_model_source(
                 "With Hub prefixes, specify the target model explicitly and "
                 "pass the speculator in --speculative-config."
             )
-    if tokenizer_only:
+    if tokenizer_only or source == "hf":
         return str(snapshot)
 
-    # Keep auxiliary files; let the existing loader select checkpoint weights.
+    # ModelScope model loading uses a full snapshot.
     kwargs["ignore_patterns"] = ignore_patterns
     return str(fetch())

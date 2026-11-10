@@ -969,6 +969,8 @@ class EngineArgs:
             self.model = resolve(
                 self.model, revision=self.revision, code_revision=self.code_revision
             )
+            if reference[0] == "hf":
+                self.model_weights = original_model
             if not self.served_model_name:
                 self.served_model_name = [reference[1]]
             if self.tokenizer is None:
@@ -2213,6 +2215,8 @@ class EngineArgs:
                 ignore_patterns=load.ignore_patterns,
                 draft=True,
             )
+            if draft.startswith("hf://"):
+                self.speculative_config["model_weights"] = draft
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine

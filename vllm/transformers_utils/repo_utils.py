@@ -29,6 +29,10 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 
+# Keep the HF file downloader bound before ModelScope patches the public symbol.
+hf_file_download = huggingface_hub.hf_hub_download
+
+
 def hf_snapshot_download(repo_id: str, **kwargs) -> str:
     """Use the original HF downloader even when ModelScope patches the Hub."""
     return _hf_snapshot_download(
@@ -50,9 +54,10 @@ def hf_api() -> HfApi:
     return _hf_api
 
 
-def hf_fs() -> "huggingface_hub.HfFileSystem":
+def hf_fs(token: str | bool | None = None) -> "huggingface_hub.HfFileSystem":
     """Return a fresh HfFileSystem tagged with vLLM's library info."""
     return huggingface_hub.HfFileSystem(
+        token=token,
         library_name="vllm",
         library_version=VLLM_VERSION,
     )
@@ -150,9 +155,12 @@ def list_repo_files(
     repo_type: str | None = None,
     token: str | bool | None = None,
 ) -> list[str]:
+    repo_id = os.fspath(repo_id)
+
     def lookup_files() -> list[str]:
+        explicit_hf = repo_id.startswith("hf://")
         # directly list files if model is local
-        if (local_path := Path(repo_id)).exists():
+        if not explicit_hf and (local_path := Path(repo_id)).exists():
             return [
                 str(file.relative_to(local_path))
                 for file in local_path.rglob("*")
@@ -160,7 +168,7 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if envs.VLLM_USE_MODELSCOPE:
+            if not explicit_hf and envs.VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import modelscope_list_repo_files
 
                 return modelscope_list_repo_files(
@@ -169,7 +177,10 @@ def list_repo_files(
                     token=os.getenv("MODELSCOPE_API_TOKEN", None),
                 )
             return hf_api().list_repo_files(
-                repo_id, revision=revision, repo_type=repo_type, token=token
+                repo_id.removeprefix("hf://"),
+                revision=revision,
+                repo_type=repo_type,
+                token=token,
             )
         except huggingface_hub.errors.OfflineModeIsEnabled:
             # Don't raise in offline mode,
